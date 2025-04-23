@@ -1,0 +1,49 @@
+version: "3"
+
+tasks:
+  setup:
+    desc: Generate zone and IP mapping files
+    cmds:
+      - echo "Generating node_zones.json..."
+      - >-
+        kubectl get nodes -o json | jq '{
+          nodes: [.items[] | {
+            (.metadata.name): .metadata.labels["topology.kubernetes.io/zone"]
+          }]
+        } | .nodes | add' > data/node_zones.json
+      - echo "Generating ip_to_node.json..."
+      - >-
+        kubectl get pods -A -o json | jq -r '.items[]
+        | select(.status.podIP and .spec.nodeName)
+        | {key: .status.podIP, value: .spec.nodeName}'
+        | jq -s 'map({(.key): .value}) | add' > data/ip_to_node.json
+
+  observe:
+    vars:
+      FILTER: '{{default "--protocol tcp" .FILTER}}'
+      LAST: '{{default "200" .LAST}}'
+    desc: Capture and analyze Hubble flow logs
+    deps:
+      - setup
+    cmds:
+      - echo Capturing last {{.LAST}} flows with filter '{{.FILTER}}' to data/flow.json...
+      - >-
+        kubectl port-forward -n kube-system svc/hubble-relay 4245:80 &
+        PF_PID=$!; sleep 5;
+        hubble observe --output json --last {{.LAST}} --server localhost:4245 {{.FILTER}} > data/flow.json;
+        kill $PF_PID || true
+      - task: analyze
+      - task: cleanup
+
+  analyze:
+    desc: Run the cross-AZ analysis script
+    cmds:
+      - echo "Running analysis script..."
+      - poetry run azflow
+
+  cleanup:
+    desc: Clean up port-forward background processes and temp files
+    cmds:
+      - echo "Cleaning up port-forward..."
+      - pkill -f 'kubectl port-forward -n kube-system svc/hubble-relay 4245:80' || true
+      - rm -f .hubble-portforward.log || true
